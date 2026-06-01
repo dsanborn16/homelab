@@ -1,100 +1,61 @@
 # Storage
 
-All storage on the R530 is managed through ZFS (native Proxmox ZFS integration).
+All storage on the R530 is managed through ZFS (native Proxmox integration).
 
 ---
 
-## ZFS Pools
+## Pools
 
-### `rpool` — OS and VM/Container Disks
+### Media and Data Pool — ZFS RAIDZ1
 
-| | |
-|---|---|
-| **Type** | 2-way mirror |
-| **Drives** | 2× Seagate ST600MM0006 600 GB SAS 10K RPM |
-| **Total** | 556 GB usable |
-| **Used** | ~34% |
-| **Compression** | LZ4 — 2.11× ratio |
-| **Purpose** | Proxmox OS, VM disk images, CT root filesystems |
+- Single-parity redundancy across 4 SAS drives (~7.3 TiB usable)
+- Contains: media library, photos, music, audiobooks, Obsidian vault, SMB file shares
+- Currently ~80% utilized — expansion in progress
 
-### `datapool` — Media and Data
+### OS and VM Pool — ZFS Mirror
 
-| | |
-|---|---|
-| **Type** | RAIDZ1 (4+1 drives) |
-| **Drives** | 4× Hitachi HUS724020ALS640 2 TB SAS 7.2K RPM |
-| **Usable** | ~7.27 TiB (after parity + overhead) |
-| **Used** | ~80% |
-| **Purpose** | Media library, photos, music, audiobooks, obsidian vault, SMB shares |
+- 2-way mirror across 2 SAS drives
+- LZ4 compression: 2.11× ratio
+- Contains: Proxmox OS, VM disk images, container root filesystems
 
-**In-progress:** expanding to 5-drive RAIDZ1 by attaching a 6th bay drive (scsi-35000c500427abac3). ZFS RAIDZ expansion is a native ZFS feature (available since OpenZFS 2.2) — online, no data loss, no unmount required.
+### NVMe Scratch
+
+- 512 GB NVMe, ext4
+- Contains: Plex transcode scratch, Immich ML cache, Minecraft world, Proxmox dump/templates
 
 ---
 
-## NVMe Cache / Scratch
+## Why ZFS
 
-| | |
-|---|---|
-| **Device** | Samsung SM961 (MZVLW512HMJP) 512 GB NVMe |
-| **Filesystem** | ext4 |
-| **Total** | 469 GB |
-| **Used** | ~38% |
-| **Purpose** | Plex transcode scratch, Immich ML cache, Minecraft world, Proxmox dump/images/templates |
+- **RAIDZ eliminates the RAID-5 write hole** — ZFS write atomicity means no corruption window during a power failure
+- **Per-block checksumming** catches silent data corruption (bit rot) that RAID controllers and LVM miss entirely
+- **Online RAIDZ expansion** — actively using OpenZFS 2.2's RAIDZ expansion feature to add a 5th drive without downtime or a resilver-and-recreate
+- **Compression** is transparent and reduces actual I/O — 2.11× ratio on the OS pool
 
 ---
 
 ## Drive Health
 
-All drives monitored by Scrutiny (SMART) with Grafana dashboards:
+Scrutiny monitors all drives via SMART, running pass/fail analysis against device-specific thresholds. Current status:
 
-| Drive | Model | Size | Health | Grown Defects | Uncorrected |
-|-------|-------|------|--------|---------------|-------------|
-| sdc (bay 2) | Hitachi HUS724020ALS640 | 2 TB | ✅ Healthy | 0 | 0 |
-| sdd (bay 3) | Hitachi HUS724020ALS640 | 2 TB | ⚠️ Watch | 56 | 2 |
-| sde (bay 4) | Hitachi HUS724020ALS640 | 2 TB | 🔴 Replace | **215** | **10** |
-| sdf (bay 5) | Hitachi HUS724020ALS640 | 2 TB | ⚠️ Watch | 3 | 2 |
-| sdh (bay 6) | WD 2 TB | 2 TB | ✅ Healthy | 0 | 0 |
-| NVMe | Samsung SM961 | 512 GB | ✅ Healthy | — | — |
+| Health | Count |
+|--------|-------|
+| Healthy | 3 drives |
+| Watch | 2 drives (elevated reallocated sectors) |
+| Replace | 1 drive (215 grown defects, 10 uncorrected read errors) — queued for replacement after RAIDZ expansion |
 
-`sde` is a known failure risk — 215 grown defects and 10 uncorrected read errors. Scheduled for replacement immediately after the RAIDZ expansion completes (replacing a RAIDZ1 member drive while online is a standard ZFS resilver operation).
+The failing drive represents a real single-point-of-failure risk on a RAIDZ1 array. Replacement is the top infrastructure priority.
 
 ---
 
-## SMB Shares
+## File Shares
 
-Samba runs on the PVE host, sharing `datapool` sub-paths to the LAN:
-
-| Share | Path |
-|-------|------|
-| `datapool` | `/datapool` |
-| `photos` | `/datapool/photos` |
-| `obsidian-vault` | `/datapool/obsidian-vault` |
-| `homeassistant` | `/datapool` |
-| `+ 5 photo sub-shares` | per-family-member photo archives |
+Samba shares from the media pool are used by Home Assistant, other containers, and workstations on the LAN. Syncthing keeps the Obsidian wiki in sync between the server and the Windows workstation.
 
 ---
 
-## Syncthing
+## Backup Status
 
-`/datapool/obsidian-vault` is kept in sync with `C:\Users\donov\Documents\Obsidian Vault` on the Windows workstation via Syncthing. Folder ID: `obsidian-vault`, both peers set to SendReceive. This is how the homelab wiki stays consistent across machines.
-
----
-
-## Backup Strategy
-
-No automated backup currently configured — identified as a gap. Planned:
-- ZFS snapshots via `zfs-auto-snapshot` or custom cron
-- Offsite copy for irreplaceable data (photos) — candidates: Backblaze B2, or a second server in Phase 5
-- `rpool` is already mirrored (hardware redundancy), but not backed up offsite
-
----
-
-## Roadmap (Storage)
-
-| Phase | Action |
-|-------|--------|
-| 1 | Replace `sde` (215 defects) after RAIDZ expansion |
-| 1 | Migrate `rpool` to 500 GB SATA SSD (free up 2 SAS bays) |
-| 2 | Add 8× 8 TB drives → second RAIDZ1 group in `datapool` (~+51 TiB) |
-| 2 | Sun NDS-4600 60-bay JBOD via LSI 9207-8e HBA (~+109 TiB) |
-| 5 | Convert R530 pool to RAIDZ2 for double-parity (~44 TiB) |
+No automated offsite backup currently configured — identified gap. Planned:
+- ZFS snapshots via cron
+- Offsite copy for irreplaceable data (photos) via Backblaze B2 or a second server (Phase 5)

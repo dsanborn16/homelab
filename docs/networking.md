@@ -1,116 +1,79 @@
 # Networking
 
-## Physical Layer
+## Design Goals
 
-- **Switching / WiFi**: Ubiquiti UniFi — managed switching with VLAN tagging, UniFi APs for wireless
-- **ISP**: Comcast Xfinity cable (residential, dynamic IP)
-- **Gateway**: Xfinity DOCSIS gateway at `10.0.0.1`
-
----
-
-## VLANs
-
-Three isolated network segments:
-
-| VLAN | Subnet | Hosts | Purpose |
-|------|--------|-------|---------|
-| Main LAN | `10.0.0.0/24` | PC, HA Pi, UniFi controller, IoT gateway | Primary workstation + IoT entry point |
-| Server VLAN | `192.168.50.0/24` | All Proxmox VMs and containers | Isolated server traffic |
-| IoT VLAN | `192.168.20.0/24` | Smart home devices | Isolated from LAN — cannot reach servers |
-
-IoT devices (TP-Link, Amazon Echo, ASUS clients) are segmented from the Server VLAN. Home Assistant bridges the IoT and Server VLANs via MQTT at `10.0.0.1:1883`.
+- No open ports on the home router
+- All public services behind SSO
+- IoT devices isolated from the server subnet
+- Remote access that works without depending on dynamic residential IP
 
 ---
 
-## Public Exposure — Oracle Cloud VPS
+## VLAN Segmentation
 
-The home router has no inbound port-forwards. All public traffic routes through an Oracle Cloud Always Free VPS:
+Three isolated segments managed by Ubiquiti UniFi:
+
+| VLAN | Purpose |
+|------|---------|
+| Main LAN | Workstations, HA hub, IoT gateway |
+| Server VLAN | All Proxmox VMs and containers |
+| IoT VLAN | Smart home devices — cannot reach server subnet |
+
+IoT devices are isolated at the switch level. Home Assistant bridges the IoT and server subnets via MQTT for device control without opening the full subnet.
+
+---
+
+## Public Exposure via Oracle Cloud
+
+The home router has no inbound port-forwards. All public traffic flows through an Oracle Cloud Always Free VPS:
 
 ```
 Internet :443
     │
-    └─► Nginx Proxy Manager (VPS: 141.148.70.220)
-            │  WireGuard tunnel (10.0.0.1/8 → 192.168.50.0/24)
-            └─► Backend services on 192.168.50.x
+    └─► Nginx Proxy Manager (Oracle Cloud VPS)
+         │  WireGuard site-to-site tunnel
+         └─► Backend services on server VLAN
 ```
 
+The server establishes an outbound WireGuard tunnel to the VPS. The VPS has a routed path into the server subnet and reverse-proxies all traffic through Nginx Proxy Manager. TLS terminates at the VPS — home never terminates public TLS.
+
 This means:
-- Zero open ports on the home router
-- TLS terminates at NPM on the VPS, not at home
-- WireGuard gives the VPS a routed path into the server VLAN
-- SSH reverse tunnels handle the few services that can't be proxied directly (Home Assistant at Hampton, MediaSite)
-
-### WireGuard Site-to-Site
-
-- **Server**: VPS (`wg0`, listens on UDP `51820`)
-- **Peer**: R530 PVE host — establishes outbound tunnel
-- VPS has `AllowedIPs = 192.168.50.0/24` → routes server VLAN traffic through the tunnel
-- Used exclusively for NPM → backend proxying; no client traffic goes through it
+- No firewall rules needed on the home router
+- Stable public IP regardless of residential ISP dynamic IP
+- Single chokepoint for all inbound traffic
 
 ---
 
 ## Remote Access
 
-### Tailscale
+**WireGuard site-to-site:** Used exclusively for the proxy path. The VPS routes service traffic through the tunnel to the server subnet.
 
-Mesh VPN with 8 nodes: workstation, laptop, phones, iPad, HA Pi, VPS.
+**Tailscale mesh (8 nodes):** Direct private access for admin use — workstation, laptop, phones, HA hub, VPS. Used to reach Proxmox, containers, and other non-public services without going through the public proxy. HA hub is configured as a Tailscale exit node.
 
-- Tailnet: `tail00fe43.ts.net`
-- Used for direct admin access to Proxmox, containers, and other internal services without going through the public proxy
-- HA Pi configured as a Tailscale exit node — allows routing all internet traffic through home when remote
-
-### SSH Reverse Tunnels
-
-For services at the Hampton site (behind a different ISP connection), SSH reverse tunnels are established from the HA Pi to the VPS:
-
-| Port on VPS | Forwards to |
-|-------------|-------------|
-| `8124` | HA Pi `:8123` (Home Assistant) |
-| `5001` | MediaSite `:5000` |
-| `25565` | Minecraft `:25565` |
+**SSH reverse tunnels:** Used for services at the second physical site that can't be proxied through WireGuard (different ISP, no control of that router). Established outbound from the remote device to the VPS.
 
 ---
 
-## DNS
+## DNS and TLS
 
-- **Public DNS**: Cloudflare — authoritative for `donovanshome.systems`
-- 12 A records pointing to VPS `141.148.70.220`
-- Wildcard cert `*.donovanshome.systems` via Let's Encrypt DNS-01 challenge, automated through NPM
-- Cert expires 2026-07-16, auto-renewed
-
-Internal DNS resolution is handled by the local resolver; no split-horizon DNS configured (services are accessed by IP internally).
+- Domain managed on Cloudflare
+- Wildcard Let's Encrypt cert covering all public subdomains, auto-renewed via DNS-01 challenge through Nginx Proxy Manager
+- All 12 public subdomains point to the VPS; no DNS records expose internal addresses
 
 ---
 
-## Subdomains
+## Authentication
 
-| Subdomain | Backend | Auth |
-|-----------|---------|------|
-| `auth.donovanshome.systems` | CT304 `:9000` | Authentik native |
-| `photos.donovanshome.systems` | CT300 `:2283` | Immich native |
-| `music.donovanshome.systems` | CT140 `:4533` | Navidrome native |
-| `ha.donovanshome.systems` | VPS `:8124` (SSH tunnel) | HA native |
-| `homeha.donovanshome.systems` | CT111 `:8123` | Authentik OAuth |
-| `stats.donovanshome.systems` | CT140 `:42010` | None (open) |
-| `sonarr.donovanshome.systems` | CT315 `:8989` | Authentik forward auth |
-| `radarr.donovanshome.systems` | CT315 `:7878` | Authentik forward auth |
-| `prowlarr.donovanshome.systems` | CT315 `:9696` | Authentik forward auth |
-| `bazarr.donovanshome.systems` | CT315 `:6767` | Authentik forward auth |
-| `jellyseerr.donovanshome.systems` | CT315 `:5055` | Plex OAuth |
-| `tautulli.donovanshome.systems` | CT315 `:8181` | Authentik forward auth |
+All public-facing services are behind Authentik forward auth. Nginx Proxy Manager checks the Authentik endpoint before passing any request to a backend — services without native OAuth are protected without any changes to the service itself. One login session covers all protected services.
+
+Exceptions: Immich and Navidrome use their own native auth; Jellyseerr uses Plex OAuth.
 
 ---
 
-## VPN Kill-Switch (Gluetun)
+## VPN Kill-Switch (Download Stack)
 
-All outbound traffic from the download containers in CT315 is routed through a Gluetun container running ProtonVPN WireGuard:
+All download traffic in the media stack is routed through a Gluetun container running ProtonVPN WireGuard:
 
-- Gluetun acts as a network gateway for qBittorrent, cross-seed, and indexer containers
-- If the VPN drops, traffic is blocked (kill-switch) rather than leaking over the clearnet
-- Port forwarding via ProtonVPN NAT-PMP, monitored by the VPN watchdog script (see [scripts](../scripts/vpn-watchdog.sh))
-
----
-
-## Cloudflare Tunnel
-
-CT106 (Obedience) runs `cloudflared` to expose the Node.js app at `obedience.donovanshome.systems` through Cloudflare's zero-trust tunnel — no VPS proxy needed for that service, and Google OAuth is the auth layer.
+- Acts as a network gateway for the torrent client and indexer containers
+- Kill-switch enforced at the container network namespace level — if the VPN drops, containers lose network entirely rather than routing over clearnet
+- Port forwarding via ProtonVPN NAT-PMP, monitored by the VPN watchdog script

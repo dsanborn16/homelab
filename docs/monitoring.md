@@ -1,68 +1,36 @@
 # Monitoring
 
-All monitoring infrastructure runs in CT310 (`192.168.50.198`).
-
 ---
 
 ## Stack
 
-| Component | Role |
-|-----------|------|
-| **Prometheus** | Metrics collection and storage |
-| **Grafana** | Dashboards and visualization |
-| **Scrutiny** | SMART drive health monitoring |
-| **InfluxDB** | Long-term metrics retention |
-| **PVE Exporter** | Proxmox cluster metrics (VMs, CTs, storage, CPU) |
-| **node_exporter** | Host-level OS metrics (per host) |
+- **Prometheus** — metrics collection from Proxmox cluster, all containers, and host-level exporters
+- **Grafana** — dashboards for cluster health, per-container CPU/RAM/network, ZFS pool status
+- **Scrutiny** — SMART drive health aggregation with per-device pass/fail thresholds
+- **PVE Exporter** — Proxmox-native metrics (VM/CT status, resource usage, storage)
+- **node_exporter** — OS-level metrics running on each host
+- **InfluxDB** — long-term metrics retention
 
 ---
 
-## Metrics Coverage
+## What's Monitored
 
-### Proxmox Cluster (via PVE Exporter)
-- Per-VM/CT CPU usage, memory, disk I/O, network
-- ZFS pool status (used/free/health)
-- Node-level CPU, memory, uptime
-- API token `root@pam!homepage` used for read-only scraping
+**Proxmox cluster:**
+- Per-container and per-VM CPU, memory, disk I/O, and network
+- ZFS pool health (used/free/status)
+- Node-level resource usage and uptime
 
-### Host Level (via node_exporter)
-- CPU, memory, disk, network interfaces
-- Load average, filesystem usage
-- Running on PVE host (`192.168.50.107:9100`)
+**Drive health:**
+Scrutiny polls all drives for SMART attributes and runs analysis against known device-specific failure thresholds. It caught the currently-critical drive (215 grown defects) before any visible symptoms.
 
-### Drive Health (via Scrutiny)
-- Polls all 6 drives for SMART data on a schedule
-- Runs failure analysis against device-specific thresholds
-- Flagged `sde` (bay 4) as critical: 215 grown defects, 10 uncorrected read errors
-- Results surfaced in Grafana and Scrutiny's web UI
-
----
-
-## Homepage Dashboard
-
-A second monitoring surface: Homepage dashboard in CT315 aggregates live API data from:
-
-| Widget | Data |
-|--------|------|
-| Proxmox | 1/2 VMs running, 9/12 LXC running, 5% CPU, 37% MEM |
-| Immich | 193,933 photos, 3,156 videos |
-| Scrutiny | 6/6 drives healthy |
-| Sonarr | Queue depth, wanted, upcoming |
-| Radarr | Queue depth, wanted |
-| Prowlarr | Active indexers |
-| Tautulli | Active Plex streams |
-| Jellyseerr | Pending requests |
-| Navidrome | Active streams |
-
-5 tabs: Media, Music, Photos, Infrastructure, Gaming. 14 live API widgets total.
+**Homepage dashboard:**
+A second surface aggregating live API data from 14 services — Proxmox cluster status, Immich photo counts, Scrutiny drive health, Sonarr/Radarr queue depth, active Plex streams, pending Jellyseerr requests, Navidrome streams. 5 tabs covering Media, Music, Photos, Infrastructure, and Gaming.
 
 ---
 
 ## Alerting
 
-Currently no automated alerting configured — monitoring is dashboard-driven (manual review).
-
-Planned:
-- Scrutiny email/webhook alerts for drive failures
-- Prometheus Alertmanager → Discord webhook for node-down events
-- Uptime Kuma for external service availability monitoring (Phase 4)
+Currently dashboard-driven — no automated alerting configured. This is an identified gap. Planned:
+- Scrutiny webhook alerts for drive SMART failures
+- Prometheus Alertmanager → Discord for container-down events
+- Uptime Kuma for external service availability (Phase 4)
